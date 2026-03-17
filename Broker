@@ -1,0 +1,201 @@
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Broker {
+    private int clientPort;
+    private int peerPort;
+    private String brokerId;
+    
+    // Mappa Topic -> Lista di Client Subscriber
+    private Map<String, List<ClientHandler>> subscriptions = new ConcurrentHashMap<>();
+    // Lista di Broker Peer collegati
+    private List<PeerHandler> peers = Collections.synchronizedList(new ArrayList<>());
+
+    public Broker(String brokerId, int clientPort, int peerPort) {
+        this.brokerId = brokerId;
+        this.clientPort = clientPort;
+        this.peerPort = peerPort;
+    }
+
+    public void start() {
+        System.out.println("Avvio Broker " + brokerId + " su porta Client: " + clientPort + ", Porta Peer: " + peerPort);
+
+        // Thread per accettare Client
+        new Thread(() -> startServerSocket(clientPort, false)).start();
+        // Thread per accettare altri Broker
+        new Thread(() -> startServerSocket(peerPort, true)).start();
+    }
+
+    private void startServerSocket(int port, boolean isPeerPort) {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            while (true) {
+                Socket socket = serverSocket.accept();
+                if (isPeerPort) {
+                    System.out.println("Nuovo Broker Peer collegato: " + socket.getInetAddress());
+                    new Thread(new PeerHandler(socket)).start();
+                } else {
+                    System.out.println("Nuovo Client collegato: " + socket.getInetAddress());
+                    new Thread(new ClientHandler(socket)).start();
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Metodo chiamato dai Client per pubblicare
+    public void publish(Message msg) {
+        System.out.println("Broker " + brokerId + " riceve PUBLISH su topic: " + msg.getTopic());
+        
+        // 1. Invia ai subscriber locali
+        List<ClientHandler> subs = subscriptions.getOrDefault(msg.getTopic(), new ArrayList<>());
+        for (ClientHandler sub : subs) {
+            sub.sendMessage(msg);
+        }
+
+        // 2. Inoltra agli altri Broker (Federazione)
+        // Per evitare loop infiniti, in un sistema reale servirebbe un TTL o un ID messaggio univoco.
+        // Qui semplifichiamo: il broker di origine non rimanda al mittente.
+        synchronized (peers) {
+            for (PeerHandler peer : peers) {
+                peer.sendMessage(msg);
+            }
+        }
+    }
+
+    // Metodo per aggiungere subscription
+    public void subscribe(String topic, ClientHandler handler) {
+        subscriptions.computeIfAbsent(topic, k -> Collections.synchronizedList(new ArrayList<>())).add(handler);
+        System.out.println("Client sottoscritto a: " + topic + " su Broker " + brokerId);
+    }
+
+    // Metodo per collegarsi a un altro broker (opzionale all'avvio)
+    public void connectToPeer(String host, int port) {
+        try {
+            Socket socket = new Socket(host, port);
+            System.out.println("Collegato al Peer Broker: " + host + ":" + port);
+            PeerHandler handler = new PeerHandler(socket);
+            peers.add(handler);
+            new Thread(handler).start();
+        } catch (IOException e) {
+            System.err.println("Impossibile collegarsi al peer " + host + ":" + port);
+        }
+    }
+
+    // --- Inner Classes per gestione Thread ---
+
+    private class ClientHandler implements Runnable {
+        private Socket socket;
+        private ObjectOutputStream out;
+        private ObjectInputStream in;
+        private String clientId;
+
+        public ClientHandler(Socket socket) {
+            this.socket = socket;
+            this.clientId = "Client-" + socket.getPort();
+        }
+
+        public void sendMessage(Message msg) {
+            try {
+                out.writeObject(msg);
+                out.flush();
+            } catch (IOException e) {
+                // Client disconnesso
+            }
+        }
+
+        @Override
+        public void run() {
+            try {
+                out = new ObjectOutputStream(socket.getOutputStream());
+                in = new ObjectInputStream(socket.getInputStream());
+                
+                // Invia ID al client
+                out.writeObject(new Message(Message.Type.SUBSCRIBE, "SYS", "ID:" + brokerId, "Broker"));
+                out.flush();
+
+                while (true) {
+                    Message msg = (Message) in.readObject();
+                    if (msg.getType() == Message.Type.SUBSCRIBE) {
+                        subscribe(msg.getTopic(), this);
+                    } else if (msg.getType() == Message.Type.PUBLISH) {
+                        publish(msg);
+                    }
+                }
+            } catch (EOFException e) {
+                System.out.println("Client disconnesso: " + clientId);
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                try { socket.close(); } catch (IOException e) {}
+            }
+        }
+    }
+
+    private class PeerHandler implements Runnable {
+        private Socket socket;
+        private ObjectOutputStream out;
+        private ObjectInputStream in;
+
+        public PeerHandler(Socket socket) {
+            this.socket = socket;
+        }
+
+        public void sendMessage(Message msg) {
+            try {
+                // Aggiungiamo un flag per dire che viene da un peer, per evitare loop se implementati
+                out.writeObject(msg); 
+                out.flush();
+            } catch (IOException e) {
+                peers.remove(this);
+            }
+        }
+
+        @Override
+        public void run() {
+            try {
+                out = new ObjectOutputStream(socket.getOutputStream());
+                in = new ObjectInputStream(socket.getInputStream());
+
+                while (true) {
+                    Message msg = (Message) in.readObject();
+                    // Quando un peer mi manda un messaggio, lo distribuisco ai miei client locali
+                    // Non lo rimando agli altri peer per evitare loop semplici in questa demo
+                    publish(msg); 
+                }
+            } catch (EOFException e) {
+                System.out.println("Peer Broker disconnesso");
+                peers.remove(this);
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                try { socket.close(); } catch (IOException e) {}
+            }
+        }
+    }
+
+    // --- MAIN per avvio ---
+    public static void main(String[] args) {
+        // Argomenti: BrokerID ClientPort PeerPort [PeerHost PeerPort]
+        
+
+        String id = "1";
+        int cPort = 11234;
+        int pPort = 11235;
+
+        Broker broker = new Broker(id, cPort, pPort);
+        broker.start();
+        boolean flag=false;
+
+        // Se specificato, connettiti a un altro broker esistente
+        if (flag) {
+            String peerHost = ;
+            int peerPort = 11235;
+            // Attendiamo un attimo che il server socket sia pronto
+            try { Thread.sleep(1000); } catch (InterruptedException e) {}
+            broker.connectToPeer(peerHost, peerPort);
+        }
+    }
+}
