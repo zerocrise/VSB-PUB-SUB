@@ -1,0 +1,29 @@
+import java.io.Serializable;
+
+public class Message implements Serializable {
+    private static final long serialVersionUID = 1L;
+    
+    public enum Type { PUBLISH, SUBSCRIBE, PEER_FORWARD }
+    
+    private Type type;
+    private String topic;
+    private String content;
+    private String senderId; // ID del client o del broker di origine
+
+    public Message(Type type, String topic, String content, String senderId) {
+        this.type = type;
+        this.topic = topic;
+        this.content = content;
+        this.senderId = senderId;
+    }
+
+    public Type getType() { return type; }
+    public String getTopic() { return topic; }
+    public String getContent() { return content; }
+    public String getSenderId() { return senderId; }
+
+    @Override
+    public String toString() {
+        return "[" + topic + "] " + content + " (Da: " + senderId + ")";
+    }
+}
